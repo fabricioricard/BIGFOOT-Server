@@ -1,10 +1,8 @@
 const express = require('express');
 const app = express();
-const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
-// Banco de dados simulado
 const usersData = [];
 
 app.get('/', (req, res) => {
@@ -29,6 +27,5 @@ app.get('/api/users', (req, res) => {
     res.json(usersData);
 });
 
-app.listen(PORT, () => {
-    console.log(`Servidor rodando em http://localhost:${PORT}`);
-});
+// Exporta o app para o Vercel
+module.exports = app;
