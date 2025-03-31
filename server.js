@@ -1,20 +1,23 @@
 const express = require('express');
 const app = express();
-const PORT = 3000; // Ou outra porta
+const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
-// Banco de dados simulado (substitua por um banco real, como SQLite ou MongoDB)
+// Banco de dados simulado
 const usersData = [];
+
+app.get('/', (req, res) => {
+    res.send("Bem-vindo ao Bigfoot Server! Use /api para enviar dados.");
+});
 
 app.post('/api', (req, res) => {
     const { walletAddress, totalSharedGB, timestamp } = req.body;
     console.log("Dados recebidos:", { walletAddress, totalSharedGB, timestamp });
 
-    // Armazena os dados
     const userIndex = usersData.findIndex(user => user.walletAddress === walletAddress);
     if (userIndex >= 0) {
-        usersData[userIndex].totalSharedGB += totalSharedGB; // Acumula GB
+        usersData[userIndex].totalSharedGB += totalSharedGB;
     } else {
         usersData.push({ walletAddress, totalSharedGB, lastUpdated: timestamp });
     }
@@ -22,7 +25,6 @@ app.post('/api', (req, res) => {
     res.status(200).json({ success: true });
 });
 
-// Endpoint para você visualizar os dados (opcional)
 app.get('/api/users', (req, res) => {
     res.json(usersData);
 });
