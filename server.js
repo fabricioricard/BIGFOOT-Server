@@ -26,8 +26,9 @@ let miningStats = {
 };
 
 // Configurações (ajuste conforme sua instalação)
-const PACKETCRYPT_PATH = './packetcrypt'; // ou caminho para o binário
+const PACKETCRYPT_PATH = './packetcrypt.exe'; // Para Windows
 const DEFAULT_POOL = 'http://pool.pkt.world';
+const API_PORT = 3001;
 
 // Endpoints da API
 
@@ -249,14 +250,15 @@ setInterval(() => {
     }
 }, 2000);
 
-server.listen(PORT, 'localhost', () => {
-    console.log(`PacketCrypt API rodando em http://localhost:${PORT}`);
+server.listen(API_PORT, 'localhost', () => {
+    console.log(`PacketCrypt API rodando em http://localhost:${API_PORT}`);
     console.log('Endpoints disponíveis:');
     console.log('  GET  /api/status - Status da mineração');
     console.log('  POST /api/start - Iniciar mineração');
     console.log('  POST /api/stop - Parar mineração');
     console.log('  GET  /api/system - Info do sistema');
     console.log('  GET  /api/check - Verificar PacketCrypt');
+    console.log('\nPronto para integração com BIGFOOT Connect Extension!');
 });
 
 // Limpeza ao sair
