@@ -34,6 +34,26 @@ app.use(rateLimit({
 initFirebase()
 
 // ========================
+// GET /
+// Root — confirma que o servidor está online
+// ========================
+app.get('/', (req, res) => {
+  res.json({
+    name:    'BIGchain Bridge API',
+    version: '1.0.0',
+    status:  'online',
+    network: process.env.SOLANA_NETWORK || 'devnet',
+    endpoints: [
+      'GET  /health',
+      'POST /bridge/convert',
+      'GET  /bridge/history/:bigAddress',
+      'GET  /bridge/limits/:bigAddress',
+      'GET  /balance/solana/:solanaAddress',
+    ]
+  })
+})
+
+// ========================
 // GET /health
 // Status do servidor e conexões
 // ========================
@@ -257,11 +277,15 @@ app.get('/balance/solana/:solanaAddress', async (req, res) => {
 
 // ========================
 // START
+// Vercel runs as serverless — app.listen only needed locally
 // ========================
-app.listen(PORT, () => {
-  console.log(`🚀 BIGchain Bridge running on port ${PORT}`)
-  console.log(`🌐 Network: ${process.env.SOLANA_NETWORK || 'devnet'}`)
-  console.log(`📊 Daily limit: ${MAX_PER_USER_DAILY} BIG/user`)
-})
+if (process.env.NODE_ENV !== 'production' || process.env.VERCEL !== '1') {
+  app.listen(PORT, () => {
+    console.log(`🚀 BIGchain Bridge running on port ${PORT}`)
+    console.log(`🌐 Network: ${process.env.SOLANA_NETWORK || 'devnet'}`)
+    console.log(`📊 Daily limit: ${MAX_PER_USER_DAILY} BIG/user`)
+  })
+}
 
+// Export for Vercel serverless
 module.exports = app
