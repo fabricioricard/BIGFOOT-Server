@@ -35,7 +35,6 @@ initFirebase()
 
 // ========================
 // GET /
-// Root — confirma que o servidor está online
 // ========================
 app.get('/', (req, res) => {
   res.json({
@@ -55,7 +54,6 @@ app.get('/', (req, res) => {
 
 // ========================
 // GET /health
-// Status do servidor e conexões
 // ========================
 app.get('/health', async (req, res) => {
   try {
@@ -73,12 +71,12 @@ app.get('/health', async (req, res) => {
 
 // ========================
 // POST /bridge/convert
-// Solicita conversão de BIG (main) → BIG (Solana SPL)
+// Converte BIG (BIGchain/pontos) → BIG (Solana SPL)
 //
 // Body: {
-//   bigAddress: "big55dc...",     // endereço na BIGchain
-//   solanaAddress: "6CSsCj...",   // endereço na Solana
-//   amount: 10.0                  // quantidade de BIG a converter
+//   bigAddress: "big{userId}",     // endereço sintético ligado ao userId do Firebase
+//   solanaAddress: "6CSsCj...",    // endereço da Phantom do usuário
+//   amount: 10.0                   // quantidade solicitada (o servidor valida o saldo real)
 // }
 // ========================
 app.post('/bridge/convert', async (req, res) => {
@@ -105,29 +103,50 @@ app.post('/bridge/convert', async (req, res) => {
   try {
     const db = getDb()
 
-    // --- Verifica saldo na BIGchain ---
-    const bigchainBalance = await getBigchainBalance(bigAddress)
-    if (bigchainBalance < parsedAmount) {
-      return res.status(400).json({
-        error: 'Insufficient BIGchain balance',
-        balance: bigchainBalance,
-        requested: parsedAmount,
-      })
-    }
+    // ── PROTEÇÃO: verificar se este usuário já fez claim este mês ──
+    // O bigAddress é "big{userId}", então o userId é bigAddress.slice(3)
+    const userId = bigAddress.slice(3)
+    const currentMonth = new Date().toISOString().slice(0, 7) // "2025-06"
 
-    // --- Verifica limite diário do usuário ---
-    const today = new Date().toISOString().split('T')[0] // "2025-03-28"
-    const dailyRef = db.collection('daily_conversions').doc(`${bigAddress}_${today}`)
-    const dailyDoc = await dailyRef.get()
-    const dailyTotal = dailyDoc.exists ? (dailyDoc.data().total || 0) : 0
+    const claimRef = db.collection('users').doc(userId).collection('claims').doc(currentMonth)
+    const claimSnap = await claimRef.get()
 
-    if (dailyTotal + parsedAmount > MAX_PER_USER_DAILY) {
+    if (claimSnap.exists) {
       return res.status(429).json({
-        error: `Daily limit of ${MAX_PER_USER_DAILY} BIG exceeded`,
-        used: dailyTotal,
-        remaining: Math.max(0, MAX_PER_USER_DAILY - dailyTotal),
+        error: 'Monthly claim already used. Next claim available on the 1st of next month.',
+        nextClaimMonth: (() => {
+          const d = new Date()
+          d.setMonth(d.getMonth() + 1, 1)
+          return d.toISOString().slice(0, 7)
+        })(),
       })
     }
+
+    // ── PROTEÇÃO: calcular saldo real no Firestore, ignorar o amount do frontend ──
+    const earningsSnap = await db
+      .collection('users')
+      .doc(userId)
+      .collection('bigpoints_earnings')
+      .get()
+
+    let realMonthlyBalance = 0
+    earningsSnap.forEach(doc => {
+      // Soma apenas os pontos do mês atual
+      if (doc.id.startsWith(currentMonth)) {
+        realMonthlyBalance += doc.data().bigpoints || 0
+      }
+    })
+
+    const safeAmount = Math.min(Math.floor(realMonthlyBalance), MAX_PER_USER_DAILY)
+
+    if (safeAmount < MIN_CONVERSION) {
+      return res.status(400).json({
+        error: `Insufficient monthly balance. Available: ${realMonthlyBalance.toFixed(2)} BIG`,
+        available: realMonthlyBalance,
+      })
+    }
+
+    console.log(`📋 Claim request: ${safeAmount} BIG (requested: ${parsedAmount}) | user: ${userId} → ${solanaAddress}`)
 
     // --- Verifica se não há conversão pendente para este usuário ---
     const pendingSnap = await db.collection('conversions')
@@ -146,52 +165,62 @@ app.post('/bridge/convert', async (req, res) => {
       id:            convRef.id,
       bigAddress,
       solanaAddress,
-      amount:        parsedAmount,
+      amount:        safeAmount,    // usa o saldo validado, não o que veio do frontend
       status:        'pending',
+      userId,
+      month:         currentMonth,
       createdAt:     Date.now(),
       completedAt:   null,
       txSignature:   null,
       error:         null,
     })
 
-    console.log(`📋 Conversion requested: ${parsedAmount} BIG | ${bigAddress} → ${solanaAddress}`)
-
     // --- Executa a transferência na Solana ---
     let txSignature
     try {
-      txSignature = await transferBIGToUser(solanaAddress, parsedAmount)
+      txSignature = await transferBIGToUser(solanaAddress, safeAmount)
     } catch (solanaErr) {
-      // Marca como falhou e retorna erro
-      await convRef.update({
-        status: 'failed',
-        error:  solanaErr.message,
-      })
+      await convRef.update({ status: 'failed', error: solanaErr.message })
       console.error('❌ Solana transfer failed:', solanaErr.message)
       return res.status(502).json({ error: `Solana transfer failed: ${solanaErr.message}` })
     }
 
-    // --- Atualiza registro como concluído ---
+    // --- Atualiza conversão como concluída ---
     await convRef.update({
-      status:       'completed',
+      status:      'completed',
       txSignature,
-      completedAt:  Date.now(),
+      completedAt: Date.now(),
     })
 
-    // --- Atualiza limite diário ---
+    // --- Registra o claim mensal para bloquear novo claim este mês ---
+    // (o frontend também registra, mas o servidor é a fonte de verdade)
+    await claimRef.set({
+      amount:        safeAmount,
+      solanaAddress,
+      txSignature,
+      conversionId:  convRef.id,
+      claimedAt:     Date.now(),
+    })
+
+    // --- Atualiza limite diário (mantém compatibilidade com lógica existente) ---
+    const today = new Date().toISOString().split('T')[0]
+    const dailyRef = db.collection('daily_conversions').doc(`${bigAddress}_${today}`)
+    const dailyDoc = await dailyRef.get()
+    const dailyTotal = dailyDoc.exists ? (dailyDoc.data().total || 0) : 0
     await dailyRef.set(
-      { total: dailyTotal + parsedAmount, updatedAt: Date.now() },
+      { total: dailyTotal + safeAmount, updatedAt: Date.now() },
       { merge: true }
     )
 
-    console.log(`✅ Conversion completed: ${parsedAmount} BIG → ${solanaAddress} | tx: ${txSignature}`)
+    console.log(`✅ Claim completed: ${safeAmount} BIG → ${solanaAddress} | tx: ${txSignature}`)
 
     return res.json({
       success:      true,
       id:           convRef.id,
-      amount:       parsedAmount,
+      amount:       safeAmount,
       solanaAddress,
       txSignature,
-      explorerUrl:  `https://explorer.solana.com/tx/${txSignature}?cluster=${process.env.SOLANA_NETWORK || 'devnet'}`,
+      explorerUrl:  `https://explorer.solana.com/tx/${txSignature}`,
     })
 
   } catch (err) {
@@ -202,7 +231,6 @@ app.post('/bridge/convert', async (req, res) => {
 
 // ========================
 // GET /bridge/history/:bigAddress
-// Histórico de conversões de um endereço
 // ========================
 app.get('/bridge/history/:bigAddress', async (req, res) => {
   const { bigAddress } = req.params
@@ -220,7 +248,6 @@ app.get('/bridge/history/:bigAddress', async (req, res) => {
       .get()
 
     const conversions = snap.docs.map(doc => doc.data())
-
     return res.json({ conversions, total: conversions.length })
   } catch (err) {
     return res.status(500).json({ error: err.message })
@@ -229,7 +256,6 @@ app.get('/bridge/history/:bigAddress', async (req, res) => {
 
 // ========================
 // GET /bridge/limits/:bigAddress
-// Consulta limite diário restante
 // ========================
 app.get('/bridge/limits/:bigAddress', async (req, res) => {
   const { bigAddress } = req.params
@@ -257,8 +283,7 @@ app.get('/bridge/limits/:bigAddress', async (req, res) => {
 })
 
 // ========================
-// GET /balance/:solanaAddress
-// Saldo BIG (SPL) na Solana
+// GET /balance/solana/:solanaAddress
 // ========================
 app.get('/balance/solana/:solanaAddress', async (req, res) => {
   const { solanaAddress } = req.params
@@ -277,7 +302,6 @@ app.get('/balance/solana/:solanaAddress', async (req, res) => {
 
 // ========================
 // START
-// Vercel runs as serverless — app.listen only needed locally
 // ========================
 if (process.env.NODE_ENV !== 'production' || process.env.VERCEL !== '1') {
   app.listen(PORT, () => {
@@ -287,5 +311,4 @@ if (process.env.NODE_ENV !== 'production' || process.env.VERCEL !== '1') {
   })
 }
 
-// Export for Vercel serverless
 module.exports = app
