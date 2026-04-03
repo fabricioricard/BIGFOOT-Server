@@ -3,7 +3,7 @@ require('dotenv').config()
 const express = require('express')
 const cors = require('cors')
 const rateLimit = require('express-rate-limit')
-const { initFirebase, getDb } = require('./firebase')
+const { initFirebase, getDb, getAuth } = require('./firebase')
 const { getBigchainBalance, getBigchainStatus } = require('./bigchain')
 const { transferBIGToUser, getBIGBalance, isValidSolanaAddress } = require('./solana')
 
@@ -32,6 +32,30 @@ app.use(rateLimit({
 // ========================
 
 initFirebase()
+
+// ========================
+// AUTH MIDDLEWARE
+// Verifica o Firebase ID Token enviado pelo frontend no header Authorization.
+// Bloqueia qualquer requisição sem token válido.
+// ========================
+
+async function verifyFirebaseToken(req, res, next) {
+  const authHeader = req.headers['authorization'] || ''
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
+
+  if (!token) {
+    return res.status(401).json({ error: 'Missing authorization token' })
+  }
+
+  try {
+    const decoded = await getAuth().verifyIdToken(token)
+    req.firebaseUser = decoded  // uid, email disponíveis nas rotas
+    next()
+  } catch (err) {
+    console.error('❌ Invalid Firebase token:', err.message)
+    return res.status(401).json({ error: 'Invalid or expired authorization token' })
+  }
+}
 
 // ========================
 // GET /
@@ -71,15 +95,15 @@ app.get('/health', async (req, res) => {
 
 // ========================
 // POST /bridge/convert
-// Converte BIG (BIGchain/pontos) → BIG (Solana SPL)
+// Protegido por verifyFirebaseToken — exige Bearer token válido no header.
 //
 // Body: {
-//   bigAddress: "big{userId}",     // endereço sintético ligado ao userId do Firebase
+//   bigAddress: "big{userId}",     // endereço sintético — validado contra o UID do token
 //   solanaAddress: "6CSsCj...",    // endereço da Phantom do usuário
-//   amount: 10.0                   // quantidade solicitada (o servidor valida o saldo real)
+//   amount: 10.0                   // ignorado — servidor calcula o saldo real
 // }
 // ========================
-app.post('/bridge/convert', async (req, res) => {
+app.post('/bridge/convert', verifyFirebaseToken, async (req, res) => {
   const { bigAddress, solanaAddress, amount } = req.body
 
   // --- Validações de entrada ---
@@ -103,11 +127,21 @@ app.post('/bridge/convert', async (req, res) => {
   try {
     const db = getDb()
 
-    // ── PROTEÇÃO: verificar se este usuário já fez claim este mês ──
-    // O bigAddress é "big{userId}", então o userId é bigAddress.slice(3)
-    const userId = bigAddress.slice(3)
+    // ── PROTEÇÃO: usar o UID do token verificado, nunca confiar no body ──
+    // O frontend envia bigAddress = "big{uid}" mas o servidor usa o UID
+    // do token JWT verificado — assim ninguém pode forjar o userId.
+    const userId = req.firebaseUser.uid
+
+    // Garante que o bigAddress do body corresponde ao usuário autenticado
+    const expectedBigAddress = `big${userId}`
+    if (bigAddress !== expectedBigAddress) {
+      console.warn(`⚠️  bigAddress mismatch: got ${bigAddress}, expected ${expectedBigAddress}`)
+      return res.status(403).json({ error: 'bigAddress does not match authenticated user' })
+    }
+
     const currentMonth = new Date().toISOString().slice(0, 7) // "2025-06"
 
+    // ── PROTEÇÃO: verificar se este usuário já fez claim este mês ──
     const claimRef = db.collection('users').doc(userId).collection('claims').doc(currentMonth)
     const claimSnap = await claimRef.get()
 
@@ -131,7 +165,6 @@ app.post('/bridge/convert', async (req, res) => {
 
     let realMonthlyBalance = 0
     earningsSnap.forEach(doc => {
-      // Soma apenas os pontos do mês atual
       if (doc.id.startsWith(currentMonth)) {
         realMonthlyBalance += doc.data().bigpoints || 0
       }
@@ -146,7 +179,7 @@ app.post('/bridge/convert', async (req, res) => {
       })
     }
 
-    console.log(`📋 Claim request: ${safeAmount} BIG (requested: ${parsedAmount}) | user: ${userId} → ${solanaAddress}`)
+    console.log(`📋 Claim: ${safeAmount} BIG | user: ${userId} (${req.firebaseUser.email}) → ${solanaAddress}`)
 
     // --- Verifica se não há conversão pendente para este usuário ---
     const pendingSnap = await db.collection('conversions')
@@ -165,7 +198,7 @@ app.post('/bridge/convert', async (req, res) => {
       id:            convRef.id,
       bigAddress,
       solanaAddress,
-      amount:        safeAmount,    // usa o saldo validado, não o que veio do frontend
+      amount:        safeAmount,
       status:        'pending',
       userId,
       month:         currentMonth,
@@ -192,8 +225,7 @@ app.post('/bridge/convert', async (req, res) => {
       completedAt: Date.now(),
     })
 
-    // --- Registra o claim mensal para bloquear novo claim este mês ---
-    // (o frontend também registra, mas o servidor é a fonte de verdade)
+    // --- Registra o claim mensal (fonte de verdade no servidor) ---
     await claimRef.set({
       amount:        safeAmount,
       solanaAddress,
@@ -202,7 +234,7 @@ app.post('/bridge/convert', async (req, res) => {
       claimedAt:     Date.now(),
     })
 
-    // --- Atualiza limite diário (mantém compatibilidade com lógica existente) ---
+    // --- Atualiza limite diário ---
     const today = new Date().toISOString().split('T')[0]
     const dailyRef = db.collection('daily_conversions').doc(`${bigAddress}_${today}`)
     const dailyDoc = await dailyRef.get()
