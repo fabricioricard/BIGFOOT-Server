@@ -14,11 +14,13 @@ const MAX_PER_USER_DAILY = Number(process.env.MAX_PER_USER_DAILY) || 1000;
 const MIN_CONVERSION     = Number(process.env.MIN_CONVERSION) || 1;
 
 // ========================
+// ⚠️ CORREÇÃO CRÍTICA: confiar no proxy (necessário na Vercel)
+// ========================
+app.set('trust proxy', 1);
+
+// ========================
 // MIDDLEWARES
 // ========================
-
-// ⚠️ CORREÇÃO: confiar no proxy para obter o IP real (necessário na Vercel)
-app.set('trust proxy', 1);
 
 // CORS restrito ao domínio do aplicativo
 const ALLOWED_ORIGIN = 'https://bigfootconnect.tech';
@@ -29,7 +31,7 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Rate limit global aumentado para 100 requests por IP por minuto
+// Rate limit global (agora com trust proxy ativo)
 app.use(rateLimit({
   windowMs: 60 * 1000,
   max: 100,
@@ -39,13 +41,11 @@ app.use(rateLimit({
 // ========================
 // INIT
 // ========================
-
 initFirebase();
 
 // ========================
 // AUTH MIDDLEWARE
 // ========================
-
 async function verifyFirebaseToken(req, res, next) {
   const authHeader = req.headers['authorization'] || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
@@ -109,7 +109,6 @@ app.get('/health', async (req, res) => {
 
 // ========================
 // POST /bridge/convert
-// Protegido por verifyFirebaseToken
 // ========================
 app.post('/bridge/convert', verifyFirebaseToken, async (req, res) => {
   const { bigAddress, solanaAddress, amount } = req.body;
@@ -135,7 +134,6 @@ app.post('/bridge/convert', verifyFirebaseToken, async (req, res) => {
     const db = getDb();
     const userId = req.firebaseUser.uid;
 
-    // Garante que o bigAddress do body corresponde ao usuário autenticado
     const expectedBigAddress = `big${userId}`;
     if (bigAddress !== expectedBigAddress) {
       console.warn(`⚠️  bigAddress mismatch: got ${bigAddress}, expected ${expectedBigAddress}`);
@@ -144,7 +142,6 @@ app.post('/bridge/convert', verifyFirebaseToken, async (req, res) => {
 
     const currentMonth = new Date().toISOString().slice(0, 7);
 
-    // Verificar se este usuário já fez claim este mês
     const claimRef = db.collection('users').doc(userId).collection('claims').doc(currentMonth);
     const claimSnap = await claimRef.get();
 
@@ -159,7 +156,6 @@ app.post('/bridge/convert', verifyFirebaseToken, async (req, res) => {
       });
     }
 
-    // Calcular saldo real no Firestore
     const earningsSnap = await db
       .collection('users')
       .doc(userId)
@@ -182,10 +178,8 @@ app.post('/bridge/convert', verifyFirebaseToken, async (req, res) => {
       });
     }
 
-    // Log seguro — apenas UID, sem email
     console.log(`📋 Claim: ${safeAmount} BIG | user: ${userId} → ${solanaAddress}`);
 
-    // Verifica se não há conversão pendente
     const pendingSnap = await db.collection('conversions')
       .where('bigAddress', '==', bigAddress)
       .where('status', '==', 'pending')
@@ -196,7 +190,6 @@ app.post('/bridge/convert', verifyFirebaseToken, async (req, res) => {
       return res.status(409).json({ error: 'You already have a pending conversion. Wait for it to complete.' });
     }
 
-    // Cria registro da conversão
     const convRef = db.collection('conversions').doc();
     await convRef.set({
       id:            convRef.id,
@@ -212,7 +205,6 @@ app.post('/bridge/convert', verifyFirebaseToken, async (req, res) => {
       error:         null,
     });
 
-    // Executa a transferência na Solana
     let txSignature;
     try {
       txSignature = await transferBIGToUser(solanaAddress, safeAmount);
@@ -222,14 +214,12 @@ app.post('/bridge/convert', verifyFirebaseToken, async (req, res) => {
       return res.status(502).json({ error: `Solana transfer failed: ${solanaErr.message}` });
     }
 
-    // Atualiza conversão como concluída
     await convRef.update({
       status:      'completed',
       txSignature,
       completedAt: Date.now(),
     });
 
-    // Registra o claim mensal
     await claimRef.set({
       amount:        safeAmount,
       solanaAddress,
@@ -238,7 +228,6 @@ app.post('/bridge/convert', verifyFirebaseToken, async (req, res) => {
       claimedAt:     Date.now(),
     });
 
-    // Atualiza limite diário
     const today = new Date().toISOString().split('T')[0];
     const dailyRef = db.collection('daily_conversions').doc(`${bigAddress}_${today}`);
     const dailyDoc = await dailyRef.get();
@@ -267,7 +256,6 @@ app.post('/bridge/convert', verifyFirebaseToken, async (req, res) => {
 
 // ========================
 // GET /bridge/history/:bigAddress
-// Protegido por verifyFirebaseToken
 // ========================
 app.get('/bridge/history/:bigAddress', verifyFirebaseToken, async (req, res) => {
   const { bigAddress } = req.params;
@@ -276,7 +264,6 @@ app.get('/bridge/history/:bigAddress', verifyFirebaseToken, async (req, res) => 
     return res.status(400).json({ error: 'Invalid BIGchain address' });
   }
 
-  // Garante que o usuário só acessa o próprio histórico
   const userId = req.firebaseUser.uid;
   const expectedBigAddress = `big${userId}`;
   if (bigAddress !== expectedBigAddress) {
@@ -300,7 +287,6 @@ app.get('/bridge/history/:bigAddress', verifyFirebaseToken, async (req, res) => 
 
 // ========================
 // GET /bridge/limits/:bigAddress
-// Protegido por verifyFirebaseToken
 // ========================
 app.get('/bridge/limits/:bigAddress', verifyFirebaseToken, async (req, res) => {
   const { bigAddress } = req.params;
@@ -309,7 +295,6 @@ app.get('/bridge/limits/:bigAddress', verifyFirebaseToken, async (req, res) => {
     return res.status(400).json({ error: 'Invalid BIGchain address' });
   }
 
-  // Garante que o usuário só acessa os próprios limites
   const userId = req.firebaseUser.uid;
   const expectedBigAddress = `big${userId}`;
   if (bigAddress !== expectedBigAddress) {
