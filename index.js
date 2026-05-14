@@ -17,6 +17,9 @@ const MIN_CONVERSION     = Number(process.env.MIN_CONVERSION) || 1;
 // MIDDLEWARES
 // ========================
 
+// ⚠️ CORREÇÃO: confiar no proxy para obter o IP real (necessário na Vercel)
+app.set('trust proxy', 1);
+
 // CORS restrito ao domínio do aplicativo
 const ALLOWED_ORIGIN = 'https://bigfootconnect.tech';
 app.use(cors({
